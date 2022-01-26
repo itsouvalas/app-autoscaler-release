@@ -119,7 +119,7 @@ addons:
 # Stemcell details
 stemcells:
 - alias: default
-  os: ubuntu-bionic
+  os: ubuntu-jammy
   version: latest
 - alias: xenial
   os: ubuntu-xenial
