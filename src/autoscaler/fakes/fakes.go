@@ -8,3 +8,5 @@ package fakes
 //go:generate counterfeiter -o ./fake_binding_db.go ../db BindingDB
 //go:generate counterfeiter -o ./fake_credentials.go ../cred_helper Credentials
 //go:generate counterfeiter -o ./fake_storedprocedure_db.go ../db StoredProcedureDB
+//go:generate counterfeiter -o ./fake_log_cache_client.go ../eventgenerator/aggregator LogCacheClientReader
+//go:generate counterfeiter -o ./fake_envelope_processor.go ../envelopeprocessor EnvelopeProcessor
