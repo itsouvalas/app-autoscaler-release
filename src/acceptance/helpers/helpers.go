@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/ginkgo/v2"
 
 	"github.com/KevinJCross/cf-test-helpers/v2/generator"
 
@@ -119,6 +119,9 @@ func OauthToken(cfg *config.Config) string {
 }
 
 func EnableServiceAccess(cfg *config.Config, orgName string) {
+	if orgName == "" {
+		Fail(fmt.Sprintf("Org must not be an empty string. Using broker:%s, serviceName:%s", cfg.ServiceBroker, cfg.ServiceName))
+	}
 	enableServiceAccess := cf.Cf("enable-service-access", cfg.ServiceName, "-b", cfg.ServiceBroker, "-o", orgName).Wait(cfg.DefaultTimeoutDuration())
 	Expect(enableServiceAccess).To(Exit(0), fmt.Sprintf("Failed to enable service %s for org %s", cfg.ServiceName, orgName))
 }
@@ -135,24 +138,26 @@ func CheckServiceExists(cfg *config.Config, spaceName, serviceName string) {
 
 	serviceCmd := cf.Cf("curl", "-f", ServicePlansUrl(cfg, spaceGuid)).Wait(cfg.DefaultTimeoutDuration())
 	if serviceCmd.ExitCode() != 0 {
-		ginkgo.Fail(fmt.Sprintf("Failed get broker information for serviceName=%s spaceName=%s", cfg.ServiceName, spaceName))
+		Fail(fmt.Sprintf("Failed get broker information for serviceName=%s spaceName=%s", cfg.ServiceName, spaceName))
 	}
 
 	var services = struct {
-		Included struct{ Service_brokers []struct{ Name string } }
+		Included struct {
+			ServiceOfferings []struct{ Name string } `json:"service_offerings"`
+		}
 	}{}
 	contents := serviceCmd.Out.Contents()
 	err := json.Unmarshal(contents, &services)
 	if err != nil {
-		ginkgo.AbortSuite(fmt.Sprintf("Failed to parse service plan json: %s\n\n'%s'", err.Error(), string(contents)))
+		AbortSuite(fmt.Sprintf("Failed to parse service plan json: %s\n\n'%s'", err.Error(), string(contents)))
 	}
-	for _, service := range services.Included.Service_brokers {
+	for _, service := range services.Included.ServiceOfferings {
 		if service.Name == serviceName {
 			return
 		}
 	}
 	cf.Cf("marketplace", "-e", cfg.ServiceName).Wait(cfg.DefaultTimeoutDuration())
-	ginkgo.Fail(fmt.Sprintf("Could not find service %s in space %s", serviceName, spaceName))
+	Fail(fmt.Sprintf("Could not find service %s in space %s", serviceName, spaceName))
 }
 
 func ServicePlansUrl(cfg *config.Config, spaceGuid string) string {

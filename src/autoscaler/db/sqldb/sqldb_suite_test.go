@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	. "code.cloudfoundry.org/app-autoscaler/src/autoscaler/testhelpers"
 
 	"code.cloudfoundry.org/app-autoscaler/src/autoscaler/db"
 	"code.cloudfoundry.org/app-autoscaler/src/autoscaler/models"
@@ -19,52 +22,81 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var dbHelper *sqlx.DB
+var (
+	dbHelper  *sqlx.DB
+	lockTable string
+)
 
 func TestSqldb(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Sqldb Suite")
 }
 
-var _ = BeforeSuite(func() {
-	var e error
+var _ = SynchronizedBeforeSuite(func() []byte {
+	var err error
 
 	dbUrl := os.Getenv("DBURL")
 	if dbUrl == "" {
 		Fail("environment variable $DBURL is not set")
 	}
 	database, err := db.GetConnection(dbUrl)
-	if err != nil {
-		Fail("failed to parse database connection: " + err.Error())
+	FailOnError("failed to parse database connection", err)
+
+	dbHelper, err = sqlx.Open(database.DriverName, database.DSN)
+	FailOnError("can not connect database: ", err)
+
+	_, err = dbHelper.Exec("DELETE from binding")
+	FailOnError("can not clean table binding", err)
+
+	_, err = dbHelper.Exec("DELETE from service_instance")
+	FailOnError("can not clean table service_instance", err)
+
+	if strings.Contains(os.Getenv("DBURL"), "postgres") && getPostgresMajorVersion() >= 12 {
+		deleteAllFunctions()
+		addPSQLFunctions()
 	}
+
+	_ = dbHelper.Close()
+	dbHelper = nil
+
+	return []byte{}
+}, func([]byte) {
+	var e error
+	lockTable = fmt.Sprintf("test_lock_%d", GinkgoParallelProcess())
+	dbUrl := os.Getenv("DBURL")
+	if dbUrl == "" {
+		Fail("environment variable $DBURL is not set")
+	}
+	database, err := db.GetConnection(dbUrl)
+	FailOnError("failed to parse database connection: ", err)
 
 	dbHelper, e = sqlx.Open(database.DriverName, database.DSN)
 	if e != nil {
 		Fail("can not connect database: " + e.Error())
 	}
 
-	e = createLockTable()
-	if e != nil {
-		Fail("can not create test lock table: " + e.Error())
-	}
+	err = createLockTable()
+	FailOnError("can not create test lock table: ", err)
+
 })
 
-var _ = AfterSuite(func() {
+var _ = SynchronizedAfterSuite(func() {
+	if dbHelper != nil && GinkgoParallelProcess() != 1 {
+		_ = dbHelper.Close()
+	}
+}, func() {
 	e := dropLockTable()
 	if e != nil {
 		Fail("can not drop test lock table: " + e.Error())
 	}
-	if dbHelper != nil {
+	if dbHelper != nil && GinkgoParallelProcess() == 1 {
 		_ = dbHelper.Close()
 	}
-
 })
 
-func cleanInstanceMetricsTable() {
-	_, e := dbHelper.Exec("DELETE FROM appinstancemetrics")
-	if e != nil {
-		Fail("can not clean table appinstancemetrics:" + e.Error())
-	}
+func cleanInstanceMetricsTableForApp(appId string) {
+	_, e := dbHelper.Exec(dbHelper.Rebind("DELETE FROM appinstancemetrics where appid=?"), appId)
+	FailOnError("can not clean table appinstancemetrics:", e)
 }
 
 func hasInstanceMetric(appId string, index int, name string, timestamp int64) bool {
@@ -80,27 +112,13 @@ func hasInstanceMetric(appId string, index int, name string, timestamp int64) bo
 	return rows.Next()
 }
 
-func getNumberOfInstanceMetrics() int {
+func getNumberOfInstanceMetricsForApp(appId string) int {
 	var num int
-	e := dbHelper.QueryRow("SELECT COUNT(*) FROM appinstancemetrics").Scan(&num)
+	e := dbHelper.QueryRow(dbHelper.Rebind("SELECT COUNT(*) FROM appinstancemetrics where appid = ?"), appId).Scan(&num)
 	if e != nil {
 		Fail("can not count the number of records in table appinstancemetrics: " + e.Error())
 	}
 	return num
-}
-
-func cleanServiceBindingTable() {
-	_, e := dbHelper.Exec("DELETE from binding")
-	if e != nil {
-		Fail("can not clean table binding: " + e.Error())
-	}
-}
-
-func cleanServiceInstanceTable() {
-	_, e := dbHelper.Exec("DELETE from service_instance")
-	if e != nil {
-		Fail("can not clean table service_instance: " + e.Error())
-	}
 }
 
 func hasServiceInstance(serviceInstanceId string) bool {
@@ -150,21 +168,22 @@ func cleanPolicyTable() {
 	}
 }
 
-func insertPolicy(appId string, scalingPolicy *models.ScalingPolicy) {
+func insertPolicy(appId string, scalingPolicy *models.ScalingPolicy, policyGuid string) {
 	policyJson, e := json.Marshal(scalingPolicy)
 	if e != nil {
 		Fail("failed to marshall scaling policy" + e.Error())
 	}
 
 	query := dbHelper.Rebind("INSERT INTO policy_json(app_id, policy_json, guid) VALUES(?, ?, ?)")
-	_, e = dbHelper.Exec(query, appId, string(policyJson), "1234")
+	_, e = dbHelper.Exec(query, appId, string(policyJson), policyGuid)
 
 	if e != nil {
-		Fail("can not insert data to table policy_json: " + e.Error())
+		Fail(fmt.Sprintf("can not insert app:%s data to table policy_json: %s", appId, e.Error()))
 	}
 }
 
 func insertPolicyWithGuid(appId string, scalingPolicy *models.ScalingPolicy, guid string) {
+	By("Insert policy:" + guid)
 	policyJson, e := json.Marshal(scalingPolicy)
 	if e != nil {
 		Fail("failed to marshall scaling policy" + e.Error())
@@ -181,9 +200,7 @@ func insertPolicyWithGuid(appId string, scalingPolicy *models.ScalingPolicy, gui
 func getAppPolicy(appId string) string {
 	query := dbHelper.Rebind("SELECT policy_json FROM policy_json WHERE app_id=? ")
 	rows, err := dbHelper.Query(query, appId)
-	if err != nil {
-		Fail("failed to get policy" + err.Error())
-	}
+	FailOnError("failed to get policy", err)
 	defer func() {
 		_ = rows.Close()
 		_ = rows.Err()
@@ -191,18 +208,15 @@ func getAppPolicy(appId string) string {
 	var policyJsonStr string
 	if rows.Next() {
 		err = rows.Scan(&policyJsonStr)
-		if err != nil {
-			Fail("failed to scan policy" + err.Error())
-		}
+		FailOnError("failed to scan policy", err)
 	}
 	return policyJsonStr
 }
 
-func cleanAppMetricTable() {
-	_, e := dbHelper.Exec("DELETE from app_metric")
-	if e != nil {
-		Fail("can not clean table app_metric : " + e.Error())
-	}
+func cleanAppMetricTable(appId string) {
+	query := dbHelper.Rebind("DELETE from app_metric where app_id = ?")
+	_, err := dbHelper.Exec(query, appId)
+	FailOnError("can not clean table app_metric or app_id", err)
 }
 
 func hasAppMetric(appId, metricType string, timestamp int64, value string) bool {
@@ -218,20 +232,29 @@ func hasAppMetric(appId, metricType string, timestamp int64, value string) bool 
 	return rows.Next()
 }
 
-func getNumberOfAppMetrics() int {
+func getNumberOfMetricsForApp(appId string) int {
 	var num int
-	e := dbHelper.QueryRow("SELECT COUNT(*) FROM app_metric").Scan(&num)
-	if e != nil {
-		Fail("can not count the number of records in table app_metric: " + e.Error())
-	}
+	query := dbHelper.Rebind("SELECT COUNT(*) FROM app_metric where app_id = ?")
+	err := dbHelper.QueryRow(query, appId).Scan(&num)
+	FailOnError("can not count the number of records in table app_metric: ", err)
 	return num
 }
 
-func cleanScalingHistoryTable() {
-	_, e := dbHelper.Exec("DELETE from scalinghistory")
-	if e != nil {
-		Fail("can not clean table scalinghistory: " + e.Error())
-	}
+func removeScalingHistoryForApp(appId string) {
+	query := dbHelper.Rebind("DELETE from scalinghistory where appId = ?")
+	_, err := dbHelper.Exec(query, appId)
+	FailOnError("can not clean table scalinghistory: ", err)
+}
+
+func removeCooldownForApp(appId string) {
+	query := dbHelper.Rebind("DELETE from scalingcooldown where appId = ?")
+	_, err := dbHelper.Exec(query, appId)
+	FailOnError("can not clean table scalingcooldown: ", err)
+}
+func removeActiveScheduleForApp(appId string) {
+	query := dbHelper.Rebind("DELETE from activeschedule where appId = ?")
+	_, err := dbHelper.Exec(query, appId)
+	FailOnError("can not clean table scalingcooldown: ", err)
 }
 
 func hasScalingHistory(appId string, timestamp int64) bool {
@@ -247,20 +270,13 @@ func hasScalingHistory(appId string, timestamp int64) bool {
 	return rows.Next()
 }
 
-func getNumberOfScalingHistories() int {
+func getScalingHistoryForApp(appId string) int {
 	var num int
-	e := dbHelper.QueryRow("SELECT COUNT(*) FROM scalinghistory").Scan(&num)
-	if e != nil {
-		Fail("can not count the number of records in table scalinghistory: " + e.Error())
-	}
+	query := dbHelper.Rebind("SELECT COUNT(*) FROM scalinghistory WHERE appid = ?")
+	row := dbHelper.QueryRow(query, appId)
+	err := row.Scan(&num)
+	FailOnError("can not count the number of records in table scalinghistory: ", err)
 	return num
-}
-
-func cleanScalingCooldownTable() {
-	_, e := dbHelper.Exec("DELETE from scalingcooldown")
-	if e != nil {
-		Fail("can not clean table scalingcooldown: " + e.Error())
-	}
 }
 
 func hasScalingCooldownRecord(appId string, expireAt int64) bool {
@@ -274,11 +290,6 @@ func hasScalingCooldownRecord(appId string, expireAt int64) bool {
 		_ = rows.Err()
 	}()
 	return rows.Next()
-}
-
-func cleanActiveScheduleTable() error {
-	_, e := dbHelper.Exec("DELETE from activeschedule")
-	return e
 }
 
 func insertActiveSchedule(appId, scheduleId string, instanceMin, instanceMax, instanceMinInitial int) error {
@@ -318,9 +329,7 @@ func insertCredential(appid string, username string, password string) error {
 func getCredential(appId string) (string, string, error) {
 	query := dbHelper.Rebind("SELECT username,password FROM credentials WHERE id=? ")
 	rows, err := dbHelper.Query(query, appId)
-	if err != nil {
-		Fail("failed to get credential" + err.Error())
-	}
+	FailOnError("failed to get credential", err)
 	defer func() {
 		_ = rows.Close()
 		_ = rows.Err()
@@ -328,9 +337,7 @@ func getCredential(appId string) (string, string, error) {
 	var username, password string
 	if rows.Next() {
 		err = rows.Scan(&username, &password)
-		if err != nil {
-			Fail("failed to scan credential" + err.Error())
-		}
+		FailOnError("failed to scan credential", err)
 	}
 	return username, password, nil
 }
@@ -346,22 +353,15 @@ func hasCredential(appId string) bool {
 	}()
 	return rows.Next()
 }
-func cleanCredentialTable() error {
-	_, err := dbHelper.Exec("DELETE FROM credentials")
-	if err != nil {
-		return err
-	}
-	return nil
-}
 
 func insertLockDetails(lock *models.Lock) (sql.Result, error) {
-	query := dbHelper.Rebind("INSERT INTO test_lock (owner,lock_timestamp,ttl) VALUES (?,?,?)")
+	query := dbHelper.Rebind(fmt.Sprintf("INSERT INTO %s (owner,lock_timestamp,ttl) VALUES (?,?,?)", lockTable))
 	result, err := dbHelper.Exec(query, lock.Owner, lock.LastModifiedTimestamp, int64(lock.Ttl/time.Second))
 	return result, err
 }
 
 func cleanLockTable() error {
-	_, err := dbHelper.Exec("DELETE FROM test_lock")
+	_, err := dbHelper.Exec(fmt.Sprintf("DELETE FROM %s", lockTable))
 	if err != nil {
 		return err
 	}
@@ -369,7 +369,7 @@ func cleanLockTable() error {
 }
 
 func dropLockTable() error {
-	_, err := dbHelper.Exec("DROP TABLE test_lock")
+	_, err := dbHelper.Exec(fmt.Sprintf("DROP TABLE %s", lockTable))
 	if err != nil {
 		return err
 	}
@@ -377,13 +377,13 @@ func dropLockTable() error {
 }
 
 func createLockTable() error {
-	_, err := dbHelper.Exec(`
-		CREATE TABLE IF NOT EXISTS test_lock (
+	_, err := dbHelper.Exec(fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
 			owner VARCHAR(255) PRIMARY KEY,
 			lock_timestamp TIMESTAMP  NOT NULL,
 			ttl BIGINT DEFAULT 0
 		);
-	`)
+	`, lockTable))
 	if err != nil {
 		return err
 	}
@@ -396,7 +396,7 @@ func validateLockInDB(ownerid string, expectedLock *models.Lock) error {
 		ttl       time.Duration
 		owner     string
 	)
-	query := dbHelper.Rebind("SELECT owner,lock_timestamp,ttl FROM test_lock WHERE owner=?")
+	query := dbHelper.Rebind(fmt.Sprintf("SELECT owner,lock_timestamp,ttl FROM %s WHERE owner=?", lockTable))
 	row := dbHelper.QueryRow(query, ownerid)
 	err := row.Scan(&owner, &timestamp, &ttl)
 	if err != nil {
@@ -420,7 +420,7 @@ func validateLockNotInDB(owner string) error {
 		timestamp time.Time
 		ttl       time.Duration
 	)
-	query := dbHelper.Rebind("SELECT owner,lock_timestamp,ttl FROM test_lock WHERE owner=?")
+	query := dbHelper.Rebind(fmt.Sprintf("SELECT owner,lock_timestamp,ttl FROM %s WHERE owner=?", lockTable))
 	row := dbHelper.QueryRow(query, owner)
 	err := row.Scan(&owner, &timestamp, &ttl)
 	if err != nil {

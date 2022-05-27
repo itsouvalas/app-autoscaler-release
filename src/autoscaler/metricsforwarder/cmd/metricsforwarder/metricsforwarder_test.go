@@ -129,7 +129,7 @@ var _ = Describe("Metricsforwarder", func() {
 					res, err := httpClient.Do(req)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(res.StatusCode).To(Equal(http.StatusOK))
-					res.Body.Close()
+					_ = res.Body.Close()
 				})
 			})
 
@@ -200,15 +200,14 @@ var _ = Describe("Metricsforwarder", func() {
 				Expect(rsp.StatusCode).To(Equal(http.StatusOK))
 			})
 			It("should return 200 for /health/readiness", func() {
-
 				req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/health/readiness", healthport), nil)
 				Expect(err).NotTo(HaveOccurred())
-
-				req.SetBasicAuth(cfg.Health.HealthCheckUsername, cfg.Health.HealthCheckPassword)
-
 				rsp, err := healthHttpClient.Do(req)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(rsp.StatusCode).To(Equal(http.StatusOK))
+				body, err := ioutil.ReadAll(rsp.Body)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(body).To(MatchJSON(`{"overall_status": "UP","checks": [ { "name":"policy_db", "type":"database", "status":"UP"}, { "name":"storedprocedure_db", "type":"database", "status":"UP"}]}`))
 			})
 		})
 

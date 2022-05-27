@@ -28,6 +28,7 @@ var _ = Describe("SchedulerSqldb", func() {
 
 	BeforeEach(func() {
 		logger = lager.NewLogger("scheduler-sqldb-test")
+		logger.RegisterSink(lager.NewWriterSink(GinkgoWriter, lager.DEBUG))
 		dbConfig = db.DatabaseConfig{
 			URL:                   os.Getenv("DBURL"),
 			MaxOpenConnections:    10,
@@ -64,7 +65,7 @@ var _ = Describe("SchedulerSqldb", func() {
 		Context("when mysql db url is not correct", func() {
 			BeforeEach(func() {
 				if strings.Contains(os.Getenv("DBURL"), "postgres") {
-					Skip("Not configured for mysql")
+					Skip("Not configured for postgres")
 				}
 				dbConfig.URL = "not-exist-user:not-exist-password@tcp(localhost)/autoscaler?tls=false"
 			})

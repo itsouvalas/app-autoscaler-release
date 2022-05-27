@@ -130,7 +130,8 @@ target/start-db-postgres_CI_true:
 	@echo " - $@ already up'"
 waitfor_postgres_CI_false:
 	@echo -n " - waiting for ${db_type} ."
-	@until docker exec postgres pg_isready &>/dev/null ; do echo -n "."; sleep 1; done
+	@COUNTER=0; until $$(docker exec postgres pg_isready &>/dev/null) || [ $$COUNTER -gt 10 ]; do echo -n "."; sleep 1; let COUNTER+=1; done;\
+ 	if [ $$COUNTER -gt 10 ]; then echo; echo "Error: timed out waiting for postgres. Try \"make clean\" first." >&2 ; exit 1; fi
 waitfor_postgres_CI_true:
 	@echo " - no ci postgres checks"
 
@@ -181,8 +182,8 @@ stop-db: check-db_type
 integration: build init-db test-certs
 	make -C src/autoscaler integration DBURL="${DBURL}"
 
-.PHONY: golangci-lint lint $(addprefix lint_,$(go_modules))
-lint: golangci-lint_check golangci-lint $(addprefix lint_,$(go_modules))
+.PHONY:lint $(addprefix lint_,$(go_modules))
+lint: golangci-lint_check $(addprefix lint_,$(go_modules))
 
 golangci-lint_check:
 	@current_version=$(shell golangci-lint version | cut -d " " -f 4);\
@@ -192,9 +193,6 @@ golangci-lint_check:
         echo "ERROR: Expected to have golangci-lint version '$${expected_version}.x' but we have $${current_version}";\
         exit 1;\
     fi
-
-golangci-lint:
-	@make -C src/autoscaler golangci-lint
 
 rubocop:
 	bundle exec rubocop -a
